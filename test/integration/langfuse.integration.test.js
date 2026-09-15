@@ -126,7 +126,7 @@ describe('Langfuse Integration', () => {
     })
 
     // Wait a bit for processing
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    await new Promise(resolve => setTimeout(resolve, 20000))
 
     // Get trace with observations
     const traces = await langfuseClient.getTraces(10, testSessionId)
@@ -149,7 +149,7 @@ describe('Langfuse Integration', () => {
     })
     expect(generation.metadata?.cache).toMatchObject({
       read: 100,
-      creation: 0,
+      creation: 25, // createApiRequestLog()'s cacheCreationTokens default, not overridden above
     })
     expect(generation.metadata?.cost).toBe(0.001)
   })
@@ -185,7 +185,7 @@ describe('Langfuse Integration', () => {
     })
 
     // Wait for processing
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    await new Promise(resolve => setTimeout(resolve, 20000))
 
     // Verify session has the metrics data
     const traces = await langfuseClient.getTraces(10, testSessionId)
@@ -221,7 +221,7 @@ describe('Langfuse Integration', () => {
     })
 
     // Wait for processing
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    await new Promise(resolve => setTimeout(resolve, 20000))
 
     // Get updated trace
     const fullTrace = await langfuseClient.getTrace(conversationTrace.id)
@@ -280,7 +280,7 @@ describe('Langfuse Integration', () => {
     })
 
     // Wait for processing
-    await new Promise(resolve => setTimeout(resolve, 2000))
+    await new Promise(resolve => setTimeout(resolve, 20000))
 
     // Validate the complete flow
     const validation = await langfuseClient.verifyTelemetryFlow(testSessionId)

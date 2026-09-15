@@ -24,6 +24,7 @@ describe('Metrics Processor', () => {
       prCount: 0,
       activeTime: 0,
       processMetric: jest.fn(), // Mock the processMetric method
+      createEvent: jest.fn(),
     }
   })
 
@@ -326,7 +327,12 @@ describe('Metrics Processor', () => {
         count: 1,
         timestamp,
       })
-      // Tool decisions now tracked by session.processMetric
+      expect(mockSession.createEvent).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'code-edit-decision',
+        input: { tool: 'Write', language: 'javascript' },
+        output: { decision: 'accept', count: 1 },
+        level: 'DEFAULT',
+      }))
     })
 
     test('initializes toolDecisions array if missing', () => {

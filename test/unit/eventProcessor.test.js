@@ -1,13 +1,4 @@
 // Mock dependencies before requiring the module
-jest.mock('langfuse', () => ({
-  Langfuse: jest.fn().mockImplementation(() => ({
-    trace: jest.fn(),
-    generation: jest.fn(),
-    event: jest.fn(),
-    flushAsync: jest.fn(() => Promise.resolve()),
-  })),
-}))
-
 jest.mock('../../src/sessionHandler', () => ({
   SessionHandler: jest.fn().mockImplementation(() => ({
     sessionId: 'test-session-123',
@@ -50,6 +41,7 @@ describe('Event Processor', () => {
       handleApiError: jest.fn(),
       handleToolResult: jest.fn(),
       handleToolDecision: jest.fn(),
+      createEvent: jest.fn(),
     }
   })
 
@@ -282,7 +274,13 @@ describe('Event Processor', () => {
         timestamp: expect.any(String),
       })
       // Note: handleToolDecision is not implemented in SessionHandler
-      // Tool decisions are handled directly in processToolDecision by creating a Langfuse event
+      // Tool decisions are handled directly in processToolDecision via session.createEvent()
+      expect(mockSession.createEvent).toHaveBeenCalledWith(expect.objectContaining({
+        name: 'tool-permission-decision',
+        input: { tool: 'Edit', source: 'user' },
+        output: { decision: 'accept' },
+        level: 'DEFAULT',
+      }))
     })
 
     test('extracts attributes from array format', () => {

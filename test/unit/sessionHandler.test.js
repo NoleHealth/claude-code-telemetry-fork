@@ -6,70 +6,70 @@ jest.mock('pino', () => () => ({
   warn: jest.fn(),
 }))
 
-jest.mock('langfuse', () => ({
-  Langfuse: jest.fn().mockImplementation(() => ({
-    trace: jest.fn(() => ({
-      update: jest.fn(),
-      event: jest.fn(),
-      span: jest.fn(() => ({
-        update: jest.fn(),
-        end: jest.fn(),
-        event: jest.fn(),
-      })),
-      score: jest.fn(),
-    })),
-    generation: jest.fn(() => ({
-      update: jest.fn(),
-      end: jest.fn(),
-    })),
-    flushAsync: jest.fn(() => Promise.resolve()),
-    on: jest.fn(),
-  })),
+// `mockStartObservation` (not a plain outer const) so Jest's module-factory hoisting
+// allows referencing it inside jest.mock() below.
+const mockStartObservation = jest.fn()
+jest.mock('@langfuse/tracing', () => ({
+  startObservation: (...args) => mockStartObservation(...args),
 }))
 
 // Now require the module after mocks are set up
 const { SessionHandler, extractAttributesArray } = require('../../src/sessionHandler')
 
+let observationCounter = 0
+
+/**
+ * Builds a fake Langfuse v5 observation (span/generation/event) matching the shape
+ * SessionHandler expects: .id, .traceId, .otelSpan.{spanContext,setAttribute}, .update(), .end()
+ */
+function createMockObservation(name = 'observation') {
+  observationCounter += 1
+  const id = `${name}-id-${observationCounter}`
+  const traceId = `${name}-trace-${observationCounter}`
+  const spanContext = { traceId, spanId: id }
+  return {
+    id,
+    traceId,
+    otelSpan: {
+      spanContext: () => spanContext,
+      setAttribute: jest.fn(),
+    },
+    update: jest.fn(),
+    end: jest.fn(),
+  }
+}
+
 describe('SessionHandler', () => {
   let session
-  let mockLangfuseInstance
+  let mockLangfuseServices
 
   beforeEach(() => {
     jest.clearAllMocks()
+    observationCounter = 0
+    mockStartObservation.mockImplementation((name) => createMockObservation(name))
 
-    // Create a mock Langfuse instance with all the methods we need
-    mockLangfuseInstance = {
-      trace: jest.fn(() => ({
-        id: 'test-trace-id',
-        update: jest.fn(),
-        event: jest.fn(),
-        span: jest.fn(() => ({
-          update: jest.fn(),
-          end: jest.fn(),
-          event: jest.fn(),
-        })),
-        score: jest.fn(),
-      })),
-      generation: jest.fn(() => ({
-        id: 'test-generation-id',
-        update: jest.fn(),
-        end: jest.fn(),
-      })),
-      event: jest.fn(),
-      score: jest.fn(),
-      flushAsync: jest.fn(() => Promise.resolve()),
+    // Bundle SessionHandler expects at this.langfuse: `client` for score/prompt REST
+    // calls, `spanProcessor` for flush/shutdown.
+    mockLangfuseServices = {
+      client: {
+        score: { create: jest.fn() },
+        flush: jest.fn(() => Promise.resolve()),
+      },
+      spanProcessor: {
+        forceFlush: jest.fn(() => Promise.resolve()),
+      },
     }
 
     session = new SessionHandler('test-session-id', {
       'service.name': 'test-service',
       'service.version': '1.0.0',
-    }, mockLangfuseInstance)
+    }, mockLangfuseServices)
   })
 
   describe('constructor', () => {
     test('initializes with correct properties', () => {
       expect(session.sessionId).toBe('test-session-id')
-      expect(session.langfuse).toBe(mockLangfuseInstance)
+      expect(session.langfuse).toBe(mockLangfuseServices)
       expect(session.totalCost).toBe(0)
       expect(session.totalTokens).toBe(0)
       expect(session.linesAdded).toBe(0)
@@ -79,7 +79,42 @@ describe('SessionHandler', () => {
     })
 
     test('throws error if sessionId is not provided', () => {
-      expect(() => new SessionHandler(null, {}, mockLangfuseInstance)).toThrow('SessionHandler requires a sessionId')
+      expect(() => new SessionHandler(null, {}, mockLangfuseServices)).toThrow('SessionHandler requires a sessionId')
+    })
+  })
+
+  describe('createEvent', () => {
+    test('returns null and does not call startObservation when there is no current trace', () => {
+      session.currentTrace = null
+      const result = session.createEvent({ name: 'no-trace-event' })
+      expect(result).toBeNull()
+      expect(mockStartObservation).not.toHaveBeenCalled()
+    })
+
+    test('nests under the current trace by default', () => {
+      session.currentTrace = createMockObservation('trace')
+      session.createEvent({ name: 'my-event', input: { a: 1 }, level: 'DEFAULT' })
+
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'my-event',
+        expect.objectContaining({ input: { a: 1 }, level: 'DEFAULT' }),
+        expect.objectContaining({
+          asType: 'event',
+          parentSpanContext: session.currentTrace.otelSpan.spanContext(),
+        }),
+      )
+    })
+
+    test('nests under an explicit parent when given', () => {
+      session.currentTrace = createMockObservation('trace')
+      const parent = createMockObservation('generation')
+      session.createEvent({ name: 'nested-event', parent })
+
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'nested-event',
+        expect.any(Object),
+        expect.objectContaining({ parentSpanContext: parent.otelSpan.spanContext() }),
+      )
     })
   })
 
@@ -105,7 +140,7 @@ describe('SessionHandler', () => {
     })
 
     test('processes lines of code metrics', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const metric = { name: 'claude_code.lines_of_code.count' }
       const dataPoint = { asDouble: 42 }
@@ -115,20 +150,18 @@ describe('SessionHandler', () => {
 
       expect(session.linesAdded).toBe(42)
       expect(session.linesRemoved).toBe(0)
-      expect(mockLangfuseInstance.event).toHaveBeenCalledWith({
-        traceId: 'test-trace-id',
-        name: 'code-modification',
-        metadata: {
-          lines: 42,
-          type: 'added',
-          timestamp: expect.any(String),
-        },
-        level: 'DEFAULT',
-      })
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'code-modification',
+        expect.objectContaining({
+          metadata: expect.objectContaining({ lines: 42, type: 'added' }),
+          level: 'DEFAULT',
+        }),
+        expect.objectContaining({ asType: 'event' }),
+      )
     })
 
     test('processes lines removed metrics', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const metric = { name: 'claude_code.lines_of_code.count' }
       const dataPoint = { asDouble: 10 }
@@ -141,7 +174,7 @@ describe('SessionHandler', () => {
     })
 
     test('processes session count metrics', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const metric = { name: 'claude_code.session.count' }
       const dataPoint = { asInt: 1 }
@@ -149,19 +182,15 @@ describe('SessionHandler', () => {
 
       session.processMetric(metric, dataPoint, attrs)
 
-      expect(session.langfuse.event).toHaveBeenCalledWith({
-        name: 'session-started',
-        traceId: 'test-trace-id',
-        metadata: {
-          count: 1,
-          timestamp: expect.any(String),
-        },
-        level: 'DEFAULT',
-      })
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'session-started',
+        expect.objectContaining({ metadata: expect.objectContaining({ count: 1 }) }),
+        expect.objectContaining({ asType: 'event' }),
+      )
     })
 
     test('processes pull request count metrics', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const metric = { name: 'claude_code.pull_request.count' }
       const dataPoint = { asDouble: 1 }
@@ -169,19 +198,15 @@ describe('SessionHandler', () => {
 
       session.processMetric(metric, dataPoint, attrs)
 
-      expect(session.langfuse.event).toHaveBeenCalledWith({
-        name: 'pull-request-created',
-        traceId: 'test-trace-id',
-        metadata: {
-          count: 1,
-          timestamp: expect.any(String),
-        },
-        level: 'DEFAULT',
-      })
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'pull-request-created',
+        expect.objectContaining({ metadata: expect.objectContaining({ count: 1 }) }),
+        expect.objectContaining({ asType: 'event' }),
+      )
     })
 
     test('processes commit count metrics', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const metric = { name: 'claude_code.commit.count' }
       const dataPoint = { asInt: 2 }
@@ -189,19 +214,15 @@ describe('SessionHandler', () => {
 
       session.processMetric(metric, dataPoint, attrs)
 
-      expect(session.langfuse.event).toHaveBeenCalledWith({
-        name: 'git-commit-created',
-        traceId: 'test-trace-id',
-        metadata: {
-          count: 2,
-          timestamp: expect.any(String),
-        },
-        level: 'DEFAULT',
-      })
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'git-commit-created',
+        expect.objectContaining({ metadata: expect.objectContaining({ count: 2 }) }),
+        expect.objectContaining({ asType: 'event' }),
+      )
     })
 
     test('processes code edit tool decision metrics', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const metric = { name: 'claude_code.code_edit_tool.decision' }
       const dataPoint = {}
@@ -213,21 +234,17 @@ describe('SessionHandler', () => {
 
       session.processMetric(metric, dataPoint, attrs)
 
-      expect(session.langfuse.event).toHaveBeenCalledWith({
-        name: 'tool-permission-decision',
-        traceId: 'test-trace-id',
-        metadata: {
-          tool: 'Write',
-          decision: 'accept',
-          language: 'javascript',
-          timestamp: expect.any(String),
-        },
-        level: 'DEFAULT',
-      })
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'tool-permission-decision',
+        expect.objectContaining({
+          metadata: expect.objectContaining({ tool: 'Write', decision: 'accept', language: 'javascript' }),
+        }),
+        expect.objectContaining({ asType: 'event' }),
+      )
     })
 
     test('processes active time total metrics', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const metric = { name: 'claude_code.active_time.total' }
       const dataPoint = { asDouble: 300.5 }
@@ -235,15 +252,11 @@ describe('SessionHandler', () => {
 
       session.processMetric(metric, dataPoint, attrs)
 
-      expect(session.langfuse.event).toHaveBeenCalledWith({
-        name: 'active-time-update',
-        traceId: 'test-trace-id',
-        metadata: {
-          seconds: 300.5,
-          timestamp: expect.any(String),
-        },
-        level: 'DEFAULT',
-      })
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'active-time-update',
+        expect.objectContaining({ metadata: expect.objectContaining({ seconds: 300.5 }) }),
+        expect.objectContaining({ asType: 'event' }),
+      )
     })
 
     test('handles unknown metrics gracefully', () => {
@@ -260,7 +273,7 @@ describe('SessionHandler', () => {
 
   describe('handleApiError', () => {
     test('logs API errors and creates events', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const attrs = {
         model: 'claude-3-opus',
@@ -271,21 +284,23 @@ describe('SessionHandler', () => {
 
       session.handleApiError(attrs, timestamp)
 
-      expect(session.langfuse.event).toHaveBeenCalledWith({
-        name: 'api-error',
-        traceId: 'test-trace-id',
-        metadata: {
-          model: 'claude-3-opus',
-          error: 'Rate limit exceeded',
-          statusCode: 429,
-          timestamp: '2024-07-31T10:00:00Z',
-        },
-        level: 'ERROR',
-      })
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'api-error',
+        expect.objectContaining({
+          metadata: {
+            model: 'claude-3-opus',
+            error: 'Rate limit exceeded',
+            statusCode: 429,
+            timestamp: '2024-07-31T10:00:00Z',
+          },
+          level: 'ERROR',
+        }),
+        expect.objectContaining({ asType: 'event' }),
+      )
     })
 
     test('handles missing error message', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const attrs = {
         model: 'claude-3-opus',
@@ -295,17 +310,16 @@ describe('SessionHandler', () => {
 
       session.handleApiError(attrs, timestamp)
 
-      expect(session.langfuse.event).toHaveBeenCalledWith({
-        name: 'api-error',
-        traceId: 'test-trace-id',
-        metadata: {
-          model: 'claude-3-opus',
-          error: 'Unknown error',
-          statusCode: 500,
-          timestamp: '2024-07-31T10:00:00Z',
-        },
-        level: 'ERROR',
-      })
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'api-error',
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            error: 'Unknown error',
+            statusCode: 500,
+          }),
+        }),
+        expect.any(Object),
+      )
     })
 
     test('handles API errors without current trace', () => {
@@ -319,11 +333,12 @@ describe('SessionHandler', () => {
       expect(() => {
         session.handleApiError(attrs, '2024-07-31T10:00:00Z')
       }).not.toThrow()
+      expect(mockStartObservation).not.toHaveBeenCalled()
     })
   })
 
   describe('handleUserPrompt', () => {
-    test('creates a new trace for conversation', () => {
+    test('creates a new trace for conversation', async () => {
       const attrs = {
         prompt: 'Hello, Claude!',
         prompt_length: 14,
@@ -331,28 +346,50 @@ describe('SessionHandler', () => {
       }
       const timestamp = '2024-07-31T10:00:00Z'
 
-      session.handleUserPrompt(attrs, timestamp)
+      await session.handleUserPrompt(attrs, timestamp)
 
       expect(session.conversationCount).toBe(1)
-      expect(mockLangfuseInstance.trace).toHaveBeenCalledWith({
-        name: 'conversation-1',
-        sessionId: 'test-session-id',
-        userId: 'test@example.com',
-        input: {
-          prompt: 'Hello, Claude!',
-          length: 14,
-        },
-        metadata: expect.objectContaining({
-          conversationIndex: 1,
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'conversation-1',
+        expect.objectContaining({
+          input: {
+            prompt: 'Hello, Claude!',
+            length: 14,
+          },
+          metadata: expect.objectContaining({
+            conversationIndex: 1,
+          }),
+          version: '1.0.0',
         }),
-        version: '1.0.0',
-      })
+      )
+
+      // sessionId/userId are set directly on the OTel span, not passed to
+      // startObservation - see setTraceIdentity() in sessionHandler.js.
+      expect(session.currentTrace.otelSpan.setAttribute).toHaveBeenCalledWith('user.id', 'test@example.com')
+      expect(session.currentTrace.otelSpan.setAttribute).toHaveBeenCalledWith('langfuse.user.id', 'test@example.com')
+      expect(session.currentTrace.otelSpan.setAttribute).toHaveBeenCalledWith('session.id', 'test-session-id')
+      expect(session.currentTrace.otelSpan.setAttribute).toHaveBeenCalledWith('langfuse.session.id', 'test-session-id')
+
+      // Ended immediately so it's visible in Langfuse right away rather than staying
+      // "in flight" for the whole conversation - see sessionHandler.js.
+      expect(session.currentTrace.end).toHaveBeenCalled()
+    })
+
+    test('starting a new conversation does not touch the previous (already-ended) trace', async () => {
+      await session.handleUserPrompt({ prompt: 'first' }, '2024-07-31T10:00:00Z')
+      const firstTrace = session.currentTrace
+      firstTrace.end.mockClear()
+
+      await session.handleUserPrompt({ prompt: 'second' }, '2024-07-31T10:00:01Z')
+
+      expect(firstTrace.end).not.toHaveBeenCalled()
+      expect(session.currentTrace).not.toBe(firstTrace)
     })
   })
 
   describe('handleApiRequest', () => {
     test('creates generation span for API requests', () => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
 
       const attrs = {
         model: 'claude-3-opus',
@@ -369,13 +406,50 @@ describe('SessionHandler', () => {
       expect(session.totalCost).toBe(0.05)
       expect(session.totalTokens).toBe(300)
       expect(session.apiCallCount).toBe(1)
-      expect(mockLangfuseInstance.generation).toHaveBeenCalled()
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'generation-claude-3-opus',
+        expect.objectContaining({
+          model: 'claude-3-opus',
+          usage: { input: 100, output: 200, total: 300, unit: 'TOKENS' },
+          usageDetails: { input: 100, output: 200, total: 300 },
+        }),
+        expect.objectContaining({ asType: 'generation' }),
+      )
+    })
+
+    test('ends the generation immediately (cannot be updated again later)', () => {
+      session.currentTrace = createMockObservation('trace')
+
+      session.handleApiRequest({ model: 'claude-3-opus', input_tokens: 1, output_tokens: 1 }, '2024-07-31T10:00:00Z')
+
+      expect(session.currentSpan.end).toHaveBeenCalled()
+    })
+
+    test('routing (haiku) generations are not tracked as currentSpan', () => {
+      session.currentTrace = createMockObservation('trace')
+
+      session.handleApiRequest({ model: 'claude-3-5-haiku', input_tokens: 1, output_tokens: 1 }, '2024-07-31T10:00:00Z')
+
+      expect(session.currentSpan).toBeNull()
+    })
+
+    test('creates its own trace when no user prompt preceded it', () => {
+      session.currentTrace = null
+
+      session.handleApiRequest({ model: 'claude-3-opus', input_tokens: 1, output_tokens: 1 }, '2024-07-31T10:00:00Z')
+
+      expect(session.currentTrace).not.toBeNull()
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'conversation-1',
+        expect.objectContaining({ input: expect.objectContaining({ firstApiCall: true }) }),
+      )
+      expect(session.currentTrace.end).toHaveBeenCalled()
     })
   })
 
   describe('handleToolResult', () => {
     beforeEach(() => {
-      session.currentTrace = mockLangfuseInstance.trace()
+      session.currentTrace = createMockObservation('trace')
     })
 
     test('extracts tool_name correctly', () => {
@@ -396,14 +470,12 @@ describe('SessionHandler', () => {
         duration: 150,
         timestamp: '2024-07-31T10:00:00Z',
       })
-      expect(session.langfuse.event).toHaveBeenCalledWith(
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'tool-Bash',
         expect.objectContaining({
-          name: 'tool-Bash',
-          traceId: 'test-trace-id',
-          input: expect.objectContaining({
-            toolName: 'Bash',
-          }),
+          input: expect.objectContaining({ toolName: 'Bash' }),
         }),
+        expect.objectContaining({ asType: 'event' }),
       )
     })
 
@@ -417,14 +489,12 @@ describe('SessionHandler', () => {
       session.handleToolResult(attrs, timestamp)
 
       expect(session.toolSequence[0].name).toBe('unknown')
-      expect(session.langfuse.event).toHaveBeenCalledWith(
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'tool-unknown',
         expect.objectContaining({
-          name: 'tool-unknown',
-          traceId: 'test-trace-id',
-          input: expect.objectContaining({
-            toolName: 'unknown',
-          }),
+          input: expect.objectContaining({ toolName: 'unknown' }),
         }),
+        expect.any(Object),
       )
     })
 
@@ -452,13 +522,12 @@ describe('SessionHandler', () => {
       session.handleToolResult(attrs, timestamp)
 
       expect(session.toolSequence[0].duration).toBe(250)
-      expect(session.langfuse.event).toHaveBeenCalledWith(
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        expect.any(String),
         expect.objectContaining({
-          traceId: 'test-trace-id',
-          output: expect.objectContaining({
-            durationMs: 250,
-          }),
+          output: expect.objectContaining({ durationMs: 250 }),
         }),
+        expect.any(Object),
       )
     })
 
@@ -473,13 +542,12 @@ describe('SessionHandler', () => {
       session.handleToolResult(attrs, timestamp)
 
       expect(session.toolSequence[0].duration).toBe(0)
-      expect(session.langfuse.event).toHaveBeenCalledWith(
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        expect.any(String),
         expect.objectContaining({
-          traceId: 'test-trace-id',
-          output: expect.objectContaining({
-            durationMs: 0,
-          }),
+          output: expect.objectContaining({ durationMs: 0 }),
         }),
+        expect.any(Object),
       )
     })
 
@@ -542,6 +610,19 @@ describe('SessionHandler', () => {
       // Tool sequence is reported during session finalization
       expect(session.toolCallCount).toBe(2)
     })
+
+    test('nests the tool event under the current generation when one exists', () => {
+      const generation = createMockObservation('generation')
+      session.currentSpan = generation
+
+      session.handleToolResult({ tool_name: 'Read', success: 'true', duration_ms: '10' }, '2024-07-31T10:00:00Z')
+
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'tool-Read',
+        expect.any(Object),
+        expect.objectContaining({ parentSpanContext: generation.otelSpan.spanContext() }),
+      )
+    })
   })
 
   describe('processLogRecord', () => {
@@ -559,7 +640,7 @@ describe('SessionHandler', () => {
       session.processLogRecord(logRecord, {})
 
       expect(session.conversationCount).toBe(initialCount + 1)
-      expect(mockLangfuseInstance.trace).toHaveBeenCalled()
+      expect(mockStartObservation).toHaveBeenCalled()
     })
 
     test('processes api request event', () => {
@@ -634,77 +715,71 @@ describe('SessionHandler', () => {
 
       await session.finalize()
 
-      expect(mockLangfuseInstance.trace).toHaveBeenCalledWith({
-        name: 'session-summary',
-        sessionId: 'test-session-id',
-        userId: expect.any(String),
-        version: '1.0.0',
-        input: expect.objectContaining({
-          sessionStart: expect.any(String),
-          metadata: expect.objectContaining({
-            service: {
-              name: 'test-service',
-              version: '1.0.0',
+      expect(mockStartObservation).toHaveBeenCalledWith(
+        'session-summary',
+        expect.objectContaining({
+          version: '1.0.0',
+          input: expect.objectContaining({
+            sessionStart: expect.any(String),
+            metadata: expect.objectContaining({
+              service: {
+                name: 'test-service',
+                version: '1.0.0',
+              },
+            }),
+          }),
+          output: expect.objectContaining({
+            conversationCount: 2,
+            apiCallCount: 3,
+            toolCallCount: 5,
+            totalCost: 0.5,
+            totalTokens: 2000,
+            codeChanges: {
+              linesAdded: 100,
+              linesRemoved: 20,
+              netChange: 80,
             },
           }),
+          metadata: expect.any(Object),
         }),
-        output: expect.objectContaining({
-          conversationCount: 2,
-          apiCallCount: 3,
-          toolCallCount: 5,
-          totalCost: 0.5,
-          totalTokens: 2000,
-          codeChanges: {
-            linesAdded: 100,
-            linesRemoved: 20,
-            netChange: 80,
-          },
-        }),
-        metadata: expect.any(Object),
-      })
+      )
 
-      expect(mockLangfuseInstance.flushAsync).toHaveBeenCalled()
+      expect(mockLangfuseServices.spanProcessor.forceFlush).toHaveBeenCalled()
+      expect(mockLangfuseServices.client.flush).toHaveBeenCalled()
     })
 
-    test('closes current span if exists', async () => {
-      // Create a mock span
-      const mockSpan = {
-        end: jest.fn(),
-      }
+    test('drops the current span reference without re-ending it', async () => {
+      // currentSpan (a generation) is already ended by the time handleApiRequest
+      // returns - see sessionHandler.js. finalize() must not call update()/end() on
+      // it again, since Langfuse silently drops updates made after end().
+      const mockSpan = createMockObservation('generation')
+      mockSpan.end() // simulate it already being ended, as handleApiRequest leaves it
+      mockSpan.end.mockClear()
+      mockSpan.update.mockClear()
       session.currentSpan = mockSpan
-      session.toolSequence = [
-        { name: 'Read', success: true, duration: 100 },
-        { name: 'Edit', success: false, duration: 200 },
-      ]
 
       await session.finalize()
 
-      expect(mockSpan.end).toHaveBeenCalledWith({
-        output: {
-          toolCount: 2,
-          tools: 'Read:true, Edit:false',
-          totalDuration: 300,
-        },
-      })
+      expect(mockSpan.end).not.toHaveBeenCalled()
+      expect(mockSpan.update).not.toHaveBeenCalled()
       expect(session.currentSpan).toBeNull()
     })
 
-    test('updates current trace if exists', async () => {
-      // Create a mock trace
-      const mockTrace = {
-        update: jest.fn(),
-      }
+    test('drops the current trace reference without re-ending it, but still records conversation latency', async () => {
+      // currentTrace is already ended when created in handleUserPrompt() - finalize()
+      // must not call update()/end() on it again (silently dropped by Langfuse).
+      const mockTrace = createMockObservation('trace')
+      mockTrace.end()
+      mockTrace.end.mockClear()
+      mockTrace.update.mockClear()
       session.currentTrace = mockTrace
       session.conversationStartTime = Date.now() - 5000 // 5 seconds ago
 
       await session.finalize()
 
-      expect(mockTrace.update).toHaveBeenCalledWith({
-        output: {
-          status: 'session_ended',
-          duration: expect.any(Number),
-        },
-      })
+      expect(mockTrace.update).not.toHaveBeenCalled()
+      expect(mockTrace.end).not.toHaveBeenCalled()
+      expect(session.currentTrace).toBeNull()
       expect(session.latencies.conversation).toHaveLength(1)
       expect(session.latencies.conversation[0]).toBeGreaterThan(4000)
     })
@@ -719,15 +794,33 @@ describe('SessionHandler', () => {
 
       await session.finalize()
 
-      const traceCall = mockLangfuseInstance.trace.mock.calls[0][0]
-      expect(traceCall.output.performance.api).toBeNull()
-      expect(traceCall.output.performance.tool).toBeNull()
-      expect(traceCall.output.performance.conversation).toBeNull()
+      const summaryCall = mockStartObservation.mock.calls.find(([name]) => name === 'session-summary')
+      expect(summaryCall[1].output.performance.api).toBeNull()
+      expect(summaryCall[1].output.performance.tool).toBeNull()
+      expect(summaryCall[1].output.performance.conversation).toBeNull()
+    })
+
+    test('creates quality and efficiency scores against the session-summary trace', async () => {
+      session.totalCost = 0.5
+      session.totalTokens = 2000
+
+      await session.finalize()
+
+      const summaryTraceId = mockStartObservation.mock.results
+        .map((r) => r.value)
+        .find((v) => v.id.startsWith('session-summary'))?.traceId
+
+      expect(mockLangfuseServices.client.score.create).toHaveBeenCalledWith(
+        expect.objectContaining({ traceId: summaryTraceId, name: 'quality' }),
+      )
+      expect(mockLangfuseServices.client.score.create).toHaveBeenCalledWith(
+        expect.objectContaining({ traceId: summaryTraceId, name: 'efficiency' }),
+      )
     })
 
     test('handles errors during finalization', async () => {
-      // Make flushAsync throw an error
-      mockLangfuseInstance.flushAsync.mockRejectedValue(new Error('Network error'))
+      // Make the flush reject
+      mockLangfuseServices.spanProcessor.forceFlush.mockRejectedValue(new Error('Network error'))
 
       session.totalCost = 0.5
       session.totalTokens = 1000
@@ -736,8 +829,8 @@ describe('SessionHandler', () => {
       await expect(session.finalize()).resolves.not.toThrow()
 
       // Should still attempt to create the trace
-      expect(mockLangfuseInstance.trace).toHaveBeenCalled()
-    })
+      expect(mockStartObservation).toHaveBeenCalledWith('session-summary', expect.any(Object))
+    }, 15000)
   })
 })
 

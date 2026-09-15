@@ -179,28 +179,25 @@ function processToolDecisionMetric(dataPoint, attrs, timestamp, session) {
   })
 
   // Create Langfuse event for tool decision
-  if (session.currentTrace && session.langfuse) {
-    session.langfuse.event({
-      name: 'code-edit-decision',
-      traceId: session.currentTrace.id,
-      input: {
-        tool,
-        language,
-      },
-      output: {
-        decision,
-        count,
-      },
-      metadata: {
-        tool,
-        decision,
-        language,
-        count,
-        timestamp: new Date(timestamp).toISOString(),
-      },
-      level: decision === 'accept' ? 'DEFAULT' : 'WARNING',
-    })
-  }
+  session.createEvent({
+    name: 'code-edit-decision',
+    input: {
+      tool,
+      language,
+    },
+    output: {
+      decision,
+      count,
+    },
+    metadata: {
+      tool,
+      decision,
+      language,
+      count,
+      timestamp: new Date(timestamp).toISOString(),
+    },
+    level: decision === 'accept' ? 'DEFAULT' : 'WARNING',
+  })
 
   logger.info({
     sessionId: session.sessionId,

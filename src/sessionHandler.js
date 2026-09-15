@@ -1,7 +1,25 @@
 // Session Handler class extracted for better testability
-// const { Langfuse } = require('langfuse') // Imported but not used directly in this file
+const { startObservation } = require('@langfuse/tracing')
 const pino = require('pino')
 const { PromptCache } = require('./promptCache')
+
+// Langfuse's OTel ingestion (in this deployment's `legacy` write mode) only promotes
+// trace-level sessionId/userId from the legacy `langfuse.*`-prefixed span attributes, not
+// the SDK's default unprefixed `session.id`/`user.id` OTel semantic-convention attributes.
+// Verified empirically against the local v4 server - see PR description. Set both so this
+// keeps working after the parent carry-over plan cuts over to `events_only` mode, where
+// the unprefixed keys are the canonical ones.
+function setTraceIdentity(observation, { userId, sessionId } = {}) {
+  if (!observation?.otelSpan) return
+  if (userId) {
+    observation.otelSpan.setAttribute('user.id', userId)
+    observation.otelSpan.setAttribute('langfuse.user.id', userId)
+  }
+  if (sessionId) {
+    observation.otelSpan.setAttribute('session.id', sessionId)
+    observation.otelSpan.setAttribute('langfuse.session.id', sessionId)
+  }
+}
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -77,6 +95,21 @@ class SessionHandler {
     )
   }
 
+  /**
+   * Create a point-in-time event observation nested under the current trace (or a more
+   * specific parent, e.g. the current generation). Events auto-end on creation and can't
+   * be updated afterwards, so every attribute must be passed up front.
+   */
+  createEvent({ name, input, output, metadata, level, parent, startTime }) {
+    if (!this.currentTrace) return null
+    const parentSpan = parent || this.currentTrace
+    return startObservation(name, { input, output, metadata, level }, {
+      asType: 'event',
+      startTime,
+      parentSpanContext: parentSpan.otelSpan.spanContext(),
+    })
+  }
+
   extractResourceInfo(resourceAttributes) {
     const attrs = resourceAttributes || {}
     return {
@@ -149,10 +182,7 @@ class SessionHandler {
     }
 
     // Create a new trace for this conversation
-    this.currentTrace = this.langfuse.trace({
-      name: traceName,
-      sessionId: this.sessionId,
-      userId: attrs['user.email'] || attrs['user.id'] || this.metadata.userId,
+    this.currentTrace = startObservation(traceName, {
       input: {
         prompt: attrs.prompt || '[Prompt hidden]',
         length: attrs.prompt_length || 0,
@@ -180,6 +210,18 @@ class SessionHandler {
       },
       version: this.metadata.release,
     })
+
+    setTraceIdentity(this.currentTrace, {
+      sessionId: this.sessionId,
+      userId: attrs['user.email'] || attrs['user.id'] || this.metadata.userId,
+    })
+
+    // End immediately so this trace is visible in Langfuse right away, rather than
+    // staying "in flight" (and therefore invisible - unended observations are never
+    // exported) for however long this conversation happens to last. Generations, tool
+    // events etc. sent afterwards still attach correctly to an already-ended parent via
+    // parentSpanContext - verified against the local server.
+    this.currentTrace.end()
   }
 
   handleApiRequest(attrs, timestamp) {
@@ -205,10 +247,7 @@ class SessionHandler {
     if (!this.currentTrace && this.apiCallCount === 1) {
       this.conversationCount++
       this.conversationStartTime = Date.now()
-      this.currentTrace = this.langfuse.trace({
-        name: `conversation-${this.conversationCount}`,
-        sessionId: this.sessionId,
-        userId: attrs['user.email'] || this.userEmail || this.metadata.userId,
+      this.currentTrace = startObservation(`conversation-${this.conversationCount}`, {
         input: {
           prompt: '[No user prompt captured - OTEL_LOG_USER_PROMPTS may be disabled]',
           model,
@@ -228,6 +267,15 @@ class SessionHandler {
         },
         version: this.metadata.release,
       })
+
+      setTraceIdentity(this.currentTrace, {
+        sessionId: this.sessionId,
+        userId: attrs['user.email'] || this.userEmail || this.metadata.userId,
+      })
+
+      // End immediately - see the comment in handleUserPrompt(). The generation created
+      // below in this same call still attaches correctly via parentSpanContext.
+      this.currentTrace.end()
     }
 
     // Create generation span
@@ -235,58 +283,72 @@ class SessionHandler {
 
     logger.debug({
       sessionId: this.sessionId,
-      traceId: this.currentTrace?.id,
+      traceId: this.currentTrace?.traceId,
       model,
       modelType,
       hasTrace: !!this.currentTrace,
       langfuseAvailable: !!this.langfuse,
     }, 'Creating generation observation')
 
-    const span = this.langfuse.generation({
-      name: `${modelType}-${model}`,
-      traceId: this.currentTrace?.id, // Use traceId, not parentObservationId
-      startTime,
-      endTime,
-      model,
-      // Link to Langfuse prompt if detected
-      ...(this.currentPromptMetadata && {
-        promptName: this.currentPromptMetadata.name,
-        promptVersion: this.currentPromptMetadata.version,
-      }),
-      input: attrs.input || `[${modelType} request]`,
-      output: attrs.output || attrs.response || `[${modelType} response]`,
-      usage: {
-        input: inputTokens,
-        output: outputTokens,
-        total: totalTokens,
-        unit: 'TOKENS',
-      },
-      metadata: {
-        cost,
-        requestId,
-        cache: {
-          read: cacheReadTokens,
-          creation: cacheCreationTokens,
-          hitRate: totalTokens > 0 ? cacheReadTokens / totalTokens : 0,
+    const usage = {
+      input: inputTokens,
+      output: outputTokens,
+      total: totalTokens,
+      unit: 'TOKENS',
+    }
+
+    const span = this.currentTrace
+      ? startObservation(`${modelType}-${model}`, {
+        model,
+        // Link to Langfuse prompt if detected
+        ...(this.currentPromptMetadata && {
+          prompt: {
+            name: this.currentPromptMetadata.name,
+            version: this.currentPromptMetadata.version,
+          },
+        }),
+        input: attrs.input || `[${modelType} request]`,
+        output: attrs.output || attrs.response || `[${modelType} response]`,
+        usage,
+        usageDetails: { input: inputTokens, output: outputTokens, total: totalTokens },
+        metadata: {
+          cost,
+          requestId,
+          cache: {
+            read: cacheReadTokens,
+            creation: cacheCreationTokens,
+            hitRate: totalTokens > 0 ? cacheReadTokens / totalTokens : 0,
+          },
+          performance: {
+            durationMs,
+            tokensPerSecond: durationMs > 0 ? (outputTokens / durationMs) * 1000 : 0,
+          },
+          model: {
+            name: model,
+            type: modelType,
+            provider: 'anthropic',
+          },
+          claude: {
+            sessionId: attrs['session.id'] || this.sessionId,
+            apiCallIndex: this.apiCallCount,
+          },
         },
-        performance: {
-          durationMs,
-          tokensPerSecond: durationMs > 0 ? (outputTokens / durationMs) * 1000 : 0,
-        },
-        model: {
-          name: model,
-          type: modelType,
-          provider: 'anthropic',
-        },
-        claude: {
-          sessionId: attrs['session.id'] || this.sessionId,
-          apiCallIndex: this.apiCallCount,
-        },
-      },
-      level: modelType === 'generation' ? 'DEFAULT' : 'DEBUG',
-      statusMessage: attrs.status_message || `${modelType} completed`,
-      version: this.metadata.release,
-    })
+        level: modelType === 'generation' ? 'DEFAULT' : 'DEBUG',
+        statusMessage: attrs.status_message || `${modelType} completed`,
+        version: this.metadata.release,
+      }, {
+        asType: 'generation',
+        startTime,
+        parentSpanContext: this.currentTrace.otelSpan.spanContext(),
+      })
+      : null
+
+    // End immediately: the full input/output/usage is already known, and a Langfuse
+    // observation silently drops any update() called after end() (verified against the
+    // local server), so this must not be deferred and re-ended later like currentTrace.
+    if (span) {
+      span.end(endTime)
+    }
 
     logger.debug({
       sessionId: this.sessionId,
@@ -336,38 +398,35 @@ class SessionHandler {
     })
 
     // Create event
-    if (this.currentTrace) {
-      this.langfuse.event({
-        name: `tool-${toolName}`,
-        traceId: this.currentTrace.id,
-        parentObservationId: this.currentSpan?.id, // Link to current generation if exists
-        startTime,
-        input: {
-          toolName,
-          decision,
+    this.createEvent({
+      name: `tool-${toolName}`,
+      parent: this.currentSpan, // Link to current generation if exists
+      startTime,
+      input: {
+        toolName,
+        decision,
+        source,
+      },
+      output: {
+        success,
+        durationMs,
+      },
+      metadata: {
+        eventTimestamp: attrs['event.timestamp'] || timestamp,
+        toolIndex: this.toolCallCount,
+        decision: {
+          type: decision,
           source,
         },
-        output: {
-          success,
+        performance: {
           durationMs,
         },
-        metadata: {
-          eventTimestamp: attrs['event.timestamp'] || timestamp,
-          toolIndex: this.toolCallCount,
-          decision: {
-            type: decision,
-            source,
-          },
-          performance: {
-            durationMs,
-          },
-          claude: {
-            sessionId: attrs['session.id'] || this.sessionId,
-          },
+        claude: {
+          sessionId: attrs['session.id'] || this.sessionId,
         },
-        level: success ? 'DEFAULT' : 'WARNING',
-      })
-    }
+      },
+      level: success ? 'DEFAULT' : 'WARNING',
+    })
 
     // Collect tool latency
     if (durationMs > 0) {
@@ -393,19 +452,16 @@ class SessionHandler {
       timestamp,
     }, 'API error occurred')
 
-    if (this.currentTrace) {
-      this.langfuse.event({
-        name: 'api-error',
-        traceId: this.currentTrace.id,
-        metadata: {
-          model,
-          error: errorMessage,
-          statusCode,
-          timestamp,
-        },
-        level: 'ERROR',
-      })
-    }
+    this.createEvent({
+      name: 'api-error',
+      metadata: {
+        model,
+        error: errorMessage,
+        statusCode,
+        timestamp,
+      },
+      level: 'ERROR',
+    })
   }
 
   processMetric(metric, dataPoint, attrs) {
@@ -422,17 +478,14 @@ class SessionHandler {
         }, 'Session count metric')
 
         // Create a session started event
-        if (this.currentTrace) {
-          this.langfuse.event({
-            name: 'session-started',
-            traceId: this.currentTrace.id,
-            metadata: {
-              count: sessionCount,
-              timestamp: new Date().toISOString(),
-            },
-            level: 'DEFAULT',
-          })
-        }
+        this.createEvent({
+          name: 'session-started',
+          metadata: {
+            count: sessionCount,
+            timestamp: new Date().toISOString(),
+          },
+          level: 'DEFAULT',
+        })
         break
       }
 
@@ -492,18 +545,15 @@ class SessionHandler {
           this.linesRemoved += lines
         }
 
-        if (this.currentTrace) {
-          this.langfuse.event({
-            traceId: this.currentTrace.id,
-            name: 'code-modification',
-            metadata: {
-              lines,
-              type: modificationType,
-              timestamp: new Date().toISOString(),
-            },
-            level: 'DEFAULT',
-          })
-        }
+        this.createEvent({
+          name: 'code-modification',
+          metadata: {
+            lines,
+            type: modificationType,
+            timestamp: new Date().toISOString(),
+          },
+          level: 'DEFAULT',
+        })
 
         logger.info({
           sessionId: this.sessionId,
@@ -521,17 +571,14 @@ class SessionHandler {
           count: prCount,
         }, 'Pull request created')
 
-        if (this.currentTrace) {
-          this.langfuse.event({
-            traceId: this.currentTrace.id,
-            name: 'pull-request-created',
-            metadata: {
-              count: prCount,
-              timestamp: new Date().toISOString(),
-            },
-            level: 'DEFAULT',
-          })
-        }
+        this.createEvent({
+          name: 'pull-request-created',
+          metadata: {
+            count: prCount,
+            timestamp: new Date().toISOString(),
+          },
+          level: 'DEFAULT',
+        })
         break
       }
 
@@ -543,17 +590,14 @@ class SessionHandler {
           count: commitCount,
         }, 'Git commit created')
 
-        if (this.currentTrace) {
-          this.langfuse.event({
-            traceId: this.currentTrace.id,
-            name: 'git-commit-created',
-            metadata: {
-              count: commitCount,
-              timestamp: new Date().toISOString(),
-            },
-            level: 'DEFAULT',
-          })
-        }
+        this.createEvent({
+          name: 'git-commit-created',
+          metadata: {
+            count: commitCount,
+            timestamp: new Date().toISOString(),
+          },
+          level: 'DEFAULT',
+        })
         break
       }
 
@@ -570,19 +614,16 @@ class SessionHandler {
           language,
         }, 'Tool permission decision')
 
-        if (this.currentTrace) {
-          this.langfuse.event({
-            traceId: this.currentTrace.id,
-            name: 'tool-permission-decision',
-            metadata: {
-              tool,
-              decision,
-              language,
-              timestamp: new Date().toISOString(),
-            },
-            level: 'DEFAULT',
-          })
-        }
+        this.createEvent({
+          name: 'tool-permission-decision',
+          metadata: {
+            tool,
+            decision,
+            language,
+            timestamp: new Date().toISOString(),
+          },
+          level: 'DEFAULT',
+        })
         break
       }
 
@@ -594,17 +635,14 @@ class SessionHandler {
           activeTimeSeconds: activeTime,
         }, 'Active time metric')
 
-        if (this.currentTrace) {
-          this.langfuse.event({
-            traceId: this.currentTrace.id,
-            name: 'active-time-update',
-            metadata: {
-              seconds: activeTime,
-              timestamp: new Date().toISOString(),
-            },
-            level: 'DEFAULT',
-          })
-        }
+        this.createEvent({
+          name: 'active-time-update',
+          metadata: {
+            seconds: activeTime,
+            timestamp: new Date().toISOString(),
+          },
+          level: 'DEFAULT',
+        })
         break
       }
 
@@ -620,29 +658,14 @@ class SessionHandler {
 
   async finalize() {
     try {
-      // Close current span if exists
-      if (this.currentSpan) {
-        this.currentSpan.end({
-          output: {
-            toolCount: this.toolSequence.length,
-            tools: this.toolSequence.map((t) => `${t.name}:${t.success}`).join(', '),
-            totalDuration: this.toolSequence.reduce((sum, t) => sum + t.duration, 0),
-          },
-        })
-        this.currentSpan = null
-      }
-
-      // Close current trace if exists
-      if (this.currentTrace) {
-        this.currentTrace.update({
-          output: {
-            status: 'session_ended',
-            duration: this.conversationStartTime ? Date.now() - this.conversationStartTime : 0,
-          },
-        })
-        if (this.conversationStartTime) {
-          this.latencies.conversation.push(Date.now() - this.conversationStartTime)
-        }
+      // currentSpan (the active generation) and currentTrace (the conversation trace)
+      // are both already ended - see handleApiRequest()/handleUserPrompt() - so just
+      // drop the references rather than calling update()/end() again, which Langfuse
+      // silently no-ops after a span has already ended.
+      this.currentSpan = null
+      this.currentTrace = null
+      if (this.conversationStartTime) {
+        this.latencies.conversation.push(Date.now() - this.conversationStartTime)
       }
 
       // Calculate percentiles
@@ -666,10 +689,7 @@ class SessionHandler {
 
       // Create session summary
       const sessionDuration = Date.now() - this.createdAt.getTime()
-      const sessionSummary = this.langfuse.trace({
-        name: 'session-summary',
-        sessionId: this.sessionId,
-        userId: this.metadata.userId || 'claude-code-user',
+      const sessionSummary = startObservation('session-summary', {
         version: this.metadata.release,
         input: {
           sessionStart: this.createdAt.toISOString(),
@@ -715,14 +735,20 @@ class SessionHandler {
         },
       })
 
+      setTraceIdentity(sessionSummary, {
+        sessionId: this.sessionId,
+        userId: this.metadata.userId || 'claude-code-user',
+      })
+      sessionSummary.end()
+
       // Calculate quality score
       const cacheHitRate = this.totalTokens > 0 ? this.latencies.api.reduce((sum, l) => sum + l, 0) / this.totalTokens : 0
       const avgResponseTime = apiPercentiles ? apiPercentiles.avg : 0
       const toolSuccessRate = this.toolSequence.length > 0 ? this.toolSequence.filter((t) => t.success).length / this.toolSequence.length : 1
       const qualityScore = Math.min(100, Math.round((cacheHitRate * 20) + (toolSuccessRate * 40) + (avgResponseTime < 1000 ? 40 : 20)))
 
-      this.langfuse.score({
-        traceId: sessionSummary.id,
+      this.langfuse.client.score.create({
+        traceId: sessionSummary.traceId,
         name: 'quality',
         value: qualityScore,
         comment: `Cache rate: ${cacheHitRate.toFixed(2)}, Tool success: ${toolSuccessRate.toFixed(2)}, Avg response: ${avgResponseTime}ms`,
@@ -731,8 +757,8 @@ class SessionHandler {
       // Score token efficiency
       if (this.totalCost > 0) {
         const tokenEfficiency = this.totalTokens / this.totalCost
-        this.langfuse.score({
-          traceId: sessionSummary.id,
+        this.langfuse.client.score.create({
+          traceId: sessionSummary.traceId,
           name: 'efficiency',
           value: Math.min(100, Math.round(tokenEfficiency / 10)),
           comment: `${this.conversationCount} conversations, $${this.totalCost.toFixed(4)}/conversation, $${tokenEfficiency.toFixed(4)}/1k tokens`,
@@ -743,7 +769,7 @@ class SessionHandler {
       const baseUrl = (process.env.LANGFUSE_HOST || 'http://localhost:3000').replace(/\/api\/public.*$/, '')
       logger.info(`View at: ${baseUrl}/sessions/${this.sessionId}`)
 
-      await retry(() => this.langfuse.flushAsync())
+      await retry(() => Promise.all([this.langfuse.spanProcessor.forceFlush(), this.langfuse.client.flush()]))
     } catch (error) {
       logger.error({ error, sessionId: this.sessionId }, 'Error finalizing session')
     }

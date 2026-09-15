@@ -114,11 +114,18 @@ class LangfuseTestClient {
    * Wait for a trace to appear with specific criteria
    */
   async waitForTrace(criteria, options = {}) {
-    const { timeout = 10000, interval = 500 } = options
+    // This deployment's Langfuse v4 server runs in `legacy` write mode (see
+    // docker-langfuse/carry-over.md), which ingests through an async pipeline rather
+    // than real-time writes - traces have been observed to take up to ~20s to become
+    // queryable, well past the old 10s default. Bump the default rather than let the
+    // (correctly-created) trace appear to be missing.
+    const { timeout = 30000, interval = 500 } = options
     const startTime = Date.now()
 
     while (Date.now() - startTime < timeout) {
-      const traces = await this.getTraces(20)
+      // Filter server-side by sessionId when available - this dev instance accumulates
+      // a lot of unrelated traces, and an unfiltered top-20 can miss the one we want.
+      const traces = await this.getTraces(20, criteria.sessionId)
 
       const found = traces.find(trace => {
         if (criteria.name && !trace.name?.includes(criteria.name)) return false

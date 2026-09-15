@@ -11,7 +11,7 @@
     "dev": "LOG_LEVEL=debug node src/server.js",
     "test": "jest --forceExit",
     "test:unit": "jest --selectProjects unit",
-    "test:integration": "jest --selectProjects integration --forceExit",
+    "test:integration": "jest --selectProjects integration --forceExit --testTimeout=60000",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:ci": "SKIP_INTEGRATION_TESTS=true jest",
@@ -61,8 +61,12 @@
     ".env.example"
   ],
   "dependencies": {
+    "@langfuse/client": "^5.11.1",
+    "@langfuse/otel": "^5.11.1",
+    "@langfuse/tracing": "^5.11.1",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/sdk-trace-node": "^2.11.0",
     "dotenv": "^17.2.1",
-    "langfuse": "^3.38.4",
     "pino": "^9.7.0",
     "pino-pretty": "^13.1.1",
     "redis": "^4.6.0",

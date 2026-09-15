@@ -115,7 +115,7 @@ describe('Request Handlers', () => {
       expect(mockRes.end).toHaveBeenCalledWith(JSON.stringify({ partialSuccess: {} }))
       expect(mockSessions.size).toBe(1)
       expect(mockSessions.has('test-session')).toBe(true)
-      expect(SessionHandler).toHaveBeenCalledWith('test-session', expect.any(Object), mockLangfuse)
+      expect(SessionHandler).toHaveBeenCalledWith('test-session', expect.any(Object), mockLangfuse, null)
       expect(processMetric).toHaveBeenCalled()
     })
 

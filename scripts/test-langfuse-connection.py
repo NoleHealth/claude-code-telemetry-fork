@@ -13,11 +13,12 @@ from datetime import datetime
 
 def install_packages():
     """Install required packages if not already installed"""
+    # Only `requests` is needed - this script talks to Langfuse's ingestion API
+    # directly over HTTP and never imports the `langfuse` Python SDK.
     packages = [
-        ("langfuse", "langfuse"),
         ("requests", "requests")
     ]
-    
+
     for package_name, import_name in packages:
         try:
             __import__(import_name)

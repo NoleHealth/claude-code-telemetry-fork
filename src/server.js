@@ -20,7 +20,10 @@
 require('dotenv').config()
 
 const http = require('http')
-const { Langfuse } = require('langfuse')
+const { NodeTracerProvider } = require('@opentelemetry/sdk-trace-node')
+const { LangfuseSpanProcessor } = require('@langfuse/otel')
+const { setLangfuseTracerProvider } = require('@langfuse/tracing')
+const { LangfuseClient } = require('@langfuse/client')
 // const { v4: uuidv4 } = require('uuid') // Currently unused
 const pino = require('pino')
 const { retry } = require('./sessionHandler')
@@ -67,26 +70,33 @@ function validateConfig() {
   }
 }
 
-// Initialize Langfuse with error handling
-const langfuse = new Langfuse({
+// Initialize Langfuse OTel tracing (traces/generations/events) and REST client (scores/prompts)
+const spanProcessor = new LangfuseSpanProcessor({
   publicKey: config.langfuse.publicKey,
   secretKey: config.langfuse.secretKey,
   baseUrl: config.langfuse.baseUrl,
   flushAt: config.langfuse.flushAt,
-  flushInterval: config.langfuse.flushInterval,
+  // config.langfuse.flushInterval (LANGFUSE_FLUSH_INTERVAL env var) is in milliseconds,
+  // matching the old v3 SDK and this deployment's existing .env files. The v4/v5
+  // LangfuseSpanProcessor's `flushInterval` is in SECONDS (verified against source:
+  // node_modules/@langfuse/otel - it does `Number(flushInterval) * 1000` internally) -
+  // convert here rather than changing the env var's long-standing unit.
+  flushInterval: config.langfuse.flushInterval / 1000,
+})
+setLangfuseTracerProvider(new NodeTracerProvider({ spanProcessors: [spanProcessor] }))
+
+const langfuseClient = new LangfuseClient({
+  publicKey: config.langfuse.publicKey,
+  secretKey: config.langfuse.secretKey,
+  baseUrl: config.langfuse.baseUrl,
 })
 
-// In test environment, try to prevent Langfuse from keeping process alive
-if (process.env.NODE_ENV === 'test' && langfuse._flushInterval) {
-  langfuse._flushInterval.unref()
-}
-
-langfuse.on('error', (error) => {
-  logger.error({ error }, 'Langfuse SDK error')
-})
+// Bundle handed to SessionHandler: `client` for score/prompt REST calls, `spanProcessor`
+// for flushing/shutting down the OTel trace pipeline.
+const langfuse = { client: langfuseClient, spanProcessor }
 
 // Initialize Prompt Cache
-const promptCache = new PromptCache(langfuse, {
+const promptCache = new PromptCache(langfuseClient, {
   l1TTL: parseInt(process.env.LANGFUSE_PROMPT_CACHE_L1_TTL || '300000', 10), // 5 minutes
   l2TTL: parseInt(process.env.LANGFUSE_PROMPT_CACHE_L2_TTL || '3600', 10), // 1 hour
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379/0',
@@ -229,7 +239,7 @@ const server = http.createServer((req, res) => {
         if (req.url === '/v1/traces') {
           handleTraces(body, res, sessions, langfuse)
         } else if (req.url === '/v1/metrics') {
-          handleMetrics(body, res, sessions, langfuse)
+          handleMetrics(body, res, sessions, langfuse, promptCache)
         } else if (req.url === '/v1/logs') {
           handleLogs(body, res, sessions, langfuse, promptCache)
         } else {
@@ -276,9 +286,10 @@ async function shutdown() {
   await finalizeAllSessions(sessions)
 
   try {
-    await retry(() => langfuse.flushAsync())
+    await retry(() => Promise.all([spanProcessor.forceFlush(), langfuseClient.flush()]))
     // Shutdown Langfuse SDK to close any remaining connections
-    await langfuse.shutdownAsync()
+    await spanProcessor.shutdown()
+    await langfuseClient.shutdown()
   } catch (error) {
     logger.error({ error }, 'Error during Langfuse shutdown')
   }
