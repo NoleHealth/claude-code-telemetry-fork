@@ -1,221 +1,77 @@
-# Claude Code Telemetry 📊
+# Claude Code Telemetry - Recreated Configuration
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Version-1.0.0-blue" alt="Version">
-  <img src="https://img.shields.io/badge/License-MIT-green" alt="License">
-  <img src="https://img.shields.io/badge/Coverage-95.44%25-brightgreen" alt="Code Coverage">
-  <img src="https://img.shields.io/badge/Docker-Required-blue" alt="Docker">
-  <img src="https://img.shields.io/badge/Node.js-18+-green" alt="Node.js">
-</p>
+This directory contains the recreated configuration files for the claude-code-telemetry container that was accidentally deleted.
 
-<p align="center">
-  <strong>See exactly how you/your team uses Claude Code</strong><br>
-  Track costs, usage patterns, and session data in real-time
-</p>
+## What Was Recreated
 
----
+The following essential files were recreated based on the running container inspection and the original repository:
 
-https://github.com/user-attachments/assets/2634cec3-94af-4a2d-90da-44cd641f1746
+### Core Files
+- `docker-compose.yml` - Docker Compose configuration
+- `.env` - Active environment configuration with your Langfuse API keys
+- `Dockerfile` - Container build configuration
+- `package.json` - Node.js dependencies and scripts
+- `src/server.js` - Minimal telemetry server implementation
 
+### Reference Files
+- `.env.example` - Template for future reference
+- `.gitignore` - Prevents sensitive files from being committed
+- `CLAUDE-SETUP.md` - Original setup documentation (preserved)
+- `scripts/test-langfuse-connection.py` - Connection test script (preserved)
 
-## 🎯 What This Actually Does
+## Current Status
 
-Claude Code Telemetry is a lightweight bridge that captures telemetry data from Claude Code and forwards it to Langfuse for visualization. You get:
+✅ **Container is running and healthy**
+- Container: `claude-code-telemetry-telemetry-server-1`
+- Port: `4318`
+- Health: Connected to Langfuse at `http://localhost:3020`
+- API Keys: Configured and working
 
-- 💰 **Cost Tracking** - See costs per session, user, and model
-- 📊 **Usage Metrics** - Token counts, cache hits, and tool usage
-- ⏱️ **Session Grouping** - Automatically groups work into 1-hour sessions
-- 🔍 **Full Transparency** - Every API call logged with complete details
-- 🔐 **Safe local data** - The packaged self-hosted Langfuse keeps your data local
+## API Keys
 
-The original motivation from the author was that when using Claude Code Pro/Max, it didn't have good options for telemetry out of the box compared to API-based requests that can be integrated with various solutions and wanted to provide a secure turnkey local setup for people using Claude Code to benefit from.
+`LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are read from `.env` (see
+`.env.example`) — do not commit real values here.
 
-### 🏗️ Built on Standards
-Uses **OpenTelemetry** for data collection, **Langfuse** for visualization, and **Claude's native observability** APIs. No proprietary formats, no vendor lock-in.
+## Container Management
 
-## 🚀 Quick Start (30 seconds)
-
-### Prerequisites
-🐳 **Docker Desktop** - [Install here](https://docker.com/products/docker-desktop) if you don't see the whale icon in your menu bar
-
-### Setup
+### View Status
 ```bash
-# Clone and enter directory
-git clone https://github.com/lainra/claude-code-telemetry && cd claude-code-telemetry
-
-# Run automated setup
-./quickstart.sh
-
-# Enable telemetry
-source claude-telemetry.env
-
-# Test it works
-claude "What is 2+2?"
+cd /home/nole/dev/shared/docker/claude-code-telemetry
+docker compose ps
 ```
 
-**That's it!** View your dashboard at http://localhost:3000
-
-### Need Help?
-Let Claude guide you through the setup:
+### View Logs
 ```bash
-claude "Set up the telemetry dashboard"
+cd /home/nole/dev/shared/docker/claude-code-telemetry
+docker compose logs -f telemetry-server
 ```
 
-## 📸 What You'll See in Langfuse
-
-### Session View
-Every conversation becomes a trackable session:
-```
-Session: 4:32 PM - 5:15 PM (43 minutes)
-├── Total Cost: $18.43
-├── API Calls: 6 (2 Haiku, 4 Opus)
-├── Total Tokens: 45,231 (31,450 cached)
-├── Tools Used:
-│   ├── Read: 23 calls
-│   ├── Edit: 8 calls
-│   ├── Bash: 4 calls
-│   └── Grep: 2 calls
-└── Cache Savings: $12.30 (40% cost reduction)
-```
-
-### Individual API Calls
-Full details for every Claude interaction:
-```
-4:45 PM - claude-3-opus-20240229
-├── Input: 12,453 tokens (8,234 from cache)
-├── Output: 3,221 tokens
-├── Cost: $4.87
-├── Duration: 3.2s
-└── Context: Feature implementation
-```
-
-### Cost Breakdown
-Track spending by model and user:
-```
-Today's Usage:
-├── Total: $67.43
-├── By Model:
-│   ├── Opus: $61.20 (91%)
-│   └── Haiku: $6.23 (9%)
-└── By User:
-    ├── alex@team.com: $28.90
-    ├── sarah@team.com: $22.15
-    └── mike@team.com: $16.38
-```
-
-## 🔧 How It Works
-
-```
-Claude Code → OpenTelemetry → Telemetry Bridge → Langfuse
-     ↓              ↓               ↓                ↓
-  User asks     Sends OTLP    Parses & forwards   Shows in
-  questions    telemetry data   to Langfuse       dashboard
-```
-
-The bridge:
-1. Listens for OpenTelemetry data from Claude Code
-2. Enriches it with session context
-3. Forwards to Langfuse for visualization
-4. Groups related work into analyzable sessions
-
-## 🌟 What This Tool Is (and Isn't)
-
-### ✅ What It Does:
-- **Tracks costs** - Know exactly what you're spending
-- **Shows usage patterns** - See when and how Claude is used
-- **Groups work sessions** - Understand complete tasks, not just individual calls
-- **Provides full transparency** - Every token and dollar accounted for
-- **Runs locally** - Your data stays on your infrastructure
-
-### ❌ What It Doesn't Do:
-- **Measure productivity** - Can't tell if you're working faster
-- **Analyze code quality** - Doesn't evaluate AI-generated code
-- **Provide strategic insights** - Just shows raw data, not recommendations
-- **Enable team collaboration** - No sharing or pattern discovery features
-- **Calculate ROI** - You'll need to determine value yourself
-
-## 🛠️ Installation Options
-
-### Option 1: Full Stack (Recommended)
-Includes Langfuse dashboard + telemetry bridge:
+### Restart Container
 ```bash
-./quickstart.sh
+cd /home/nole/dev/shared/docker/claude-code-telemetry
+docker compose restart
 ```
 
-### Option 2: Bridge Only (Manual w/NPM)
-Already have Langfuse? Just run the bridge:
+### Rebuild Container (if needed)
 ```bash
-# Configure your existing Langfuse credentials
-export LANGFUSE_PUBLIC_KEY=your-public-key
-export LANGFUSE_SECRET_KEY=your-secret-key
-export LANGFUSE_HOST=your-langfuse-url
-
-# Install and start the bridge
-npm install
-npm start
+cd /home/nole/dev/shared/docker/claude-code-telemetry
+docker compose down
+docker compose build
+docker compose up -d
 ```
 
-### Option 3: Bridge Only (Docker)
-Already have Langfuse? Run the bridge in Docker:
+### Health Check
 ```bash
-# Create .env file with your Langfuse credentials
-cp .env.example .env
-# Edit .env with your LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_HOST
-
-# Run just the telemetry bridge container
-docker compose up telemetry-bridge
+curl http://localhost:4318/health
 ```
 
-## 📋 Requirements
+## Original Repository
 
-- Docker Desktop ([install](https://docker.com/products/docker-desktop)) - For quickstart
-- Claude Code CLI (`claude`)
-- Node.js 18+ (optional) - For bridge-only mode
+The container was built from: https://github.com/lainra/claude-code-telemetry
 
-## 🎛️ Configuration
+## Notes
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `SESSION_TIMEOUT` | 1 hour | Groups related work into sessions |
-| `OTLP_RECEIVER_PORT` | 4318 | OpenTelemetry standard port |
-| `LANGFUSE_HOST` | http://localhost:3000 | Langfuse dashboard URL |
-| `LOG_LEVEL` | info | Logging verbosity |
-
-See `.env.example` for all options.
-
-## 🔒 Privacy & Security
-
-- **100% Local** - No external services unless you configure them
-- **No Code Storage** - Only metadata about interactions
-- **You Control the Data** - Runs on your infrastructure
-- **Optional Prompt Logging** - Choose whether to log prompts
-
-## 📚 Documentation
-
-- [Environment Variables](docs/ENVIRONMENT_VARIABLES.md) - Complete configuration guide
-- [Telemetry Guide](docs/TELEMETRY_GUIDE.md) - Understanding the data format
-
-## 🤔 Should You Use This?
-
-**Use this if you want to:**
-- Track Claude Code costs across your team
-- Understand usage patterns and peak times  
-- Have transparency into AI tool spending
-- Keep telemetry data on your own infrastructure
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-<p align="center">
-  <strong>Simple, honest telemetry for Claude Code</strong><br>
-  <em>100% AI-assisted repository, made with ❤️ by Claude and <a href="https://github.com/lainra">@lainra</a></em><br><br>
-  <a href="https://github.com/lainra/claude-code-telemetry/issues">Report Issue</a> · 
-  <a href="https://github.com/lainra/claude-code-telemetry/pulls">Submit PR</a>
-</p>
+- The current implementation is a minimal recreation focused on maintaining container functionality
+- All original API keys and configuration have been preserved
+- The container continues to work with your existing Langfuse instance
+- For full functionality, consider cloning the original repository if needed

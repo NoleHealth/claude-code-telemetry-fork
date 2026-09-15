@@ -68,7 +68,7 @@ function handleMetrics(data, res, sessions, langfuse) {
                 // Get or create session
                 if (!sessions.has(sessionId)) {
                   const resourceAttrs = extractAttributesArray(resource?.attributes)
-                  sessions.set(sessionId, new SessionHandler(sessionId, resourceAttrs, langfuse))
+                  sessions.set(sessionId, new SessionHandler(sessionId, resourceAttrs, langfuse, promptCache))
                 }
 
                 const session = sessions.get(sessionId)
@@ -92,7 +92,7 @@ function handleMetrics(data, res, sessions, langfuse) {
 /**
  * Handle OTLP logs endpoint
  */
-function handleLogs(data, res, sessions, langfuse) {
+function handleLogs(data, res, sessions, langfuse, promptCache = null) {
   try {
     const logs = JSON.parse(data.toString())
     logger.debug({ size: data.length }, 'Received logs')
@@ -114,7 +114,7 @@ function handleLogs(data, res, sessions, langfuse) {
               // Get or create session
               if (!sessions.has(sessionId)) {
                 const resourceAttrs = extractAttributesArray(resource?.attributes)
-                sessions.set(sessionId, new SessionHandler(sessionId, resourceAttrs, langfuse))
+                sessions.set(sessionId, new SessionHandler(sessionId, resourceAttrs, langfuse, promptCache))
               }
 
               const session = sessions.get(sessionId)
@@ -129,7 +129,7 @@ function handleLogs(data, res, sessions, langfuse) {
 
                 if (!sessions.has(sessionId)) {
                   const resourceAttrs = extractAttributesArray(resource?.attributes)
-                  sessions.set(sessionId, new SessionHandler(sessionId, resourceAttrs, langfuse))
+                  sessions.set(sessionId, new SessionHandler(sessionId, resourceAttrs, langfuse, promptCache))
                 }
 
                 const session = sessions.get(sessionId)

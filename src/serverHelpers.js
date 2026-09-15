@@ -46,6 +46,12 @@ function createConfig() {
       flushAt: parseInt(process.env.LANGFUSE_FLUSH_AT || '20', 10),
       flushInterval: parseInt(process.env.LANGFUSE_FLUSH_INTERVAL || '10000', 10),
     },
+    promptCache: {
+      l1TTL: parseInt(process.env.LANGFUSE_PROMPT_CACHE_L1_TTL || '300000', 10), // 5 minutes
+      l2TTL: parseInt(process.env.LANGFUSE_PROMPT_CACHE_L2_TTL || '3600', 10), // 1 hour  
+      redisUrl: process.env.REDIS_URL || 'redis://localhost:6379/0',
+      preload: process.env.LANGFUSE_PROMPT_PRELOAD === 'true',
+    },
     retryAttempts: parseInt(process.env.RETRY_ATTEMPTS || '3', 10),
     apiKey: process.env.API_KEY,
     nodeEnv: process.env.NODE_ENV || 'production',

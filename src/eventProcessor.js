@@ -9,6 +9,27 @@ const pino = require('pino')
 const { extractAttributesArray } = require('./sessionHandler')
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 
+// Regex pattern to detect Langfuse prompt references
+// Matches: @langfuse-mcp prompt="prompt-name" [optional parameters]
+const LANGFUSE_PROMPT_PATTERN = /@langfuse-mcp\s+prompt="([^"]+)"/
+
+/**
+ * Detect Langfuse prompt reference in user message
+ * @param {string} text - User prompt text
+ * @returns {string|null} Prompt name if detected, null otherwise
+ */
+function detectLangfusePrompt(text) {
+  if (!text) return null
+  
+  const match = text.match(LANGFUSE_PROMPT_PATTERN)
+  if (match && match[1]) {
+    logger.debug({ promptName: match[1] }, 'Detected Langfuse prompt reference')
+    return match[1]
+  }
+  
+  return null
+}
+
 /**
  * Process a Claude Code event from log record
  * @param {Object} logRecord - OTLP log record
@@ -83,6 +104,9 @@ function processUserPrompt(attrs, standardAttrs, timestamp, session) {
 
   logger.debug({ attrs, prompt, promptLength, standardAttrs }, 'Processing user prompt with attributes')
 
+  // Detect Langfuse prompt reference
+  const langfusePromptName = detectLangfusePrompt(prompt)
+
   // Pass all attributes to session handler
   session.handleUserPrompt({
     prompt,
@@ -94,6 +118,9 @@ function processUserPrompt(attrs, standardAttrs, timestamp, session) {
     'user.account_uuid': standardAttrs.userAccountUuid,
     'terminal.type': standardAttrs.terminalType,
     'app.version': standardAttrs.appVersion,
+    // Add Langfuse prompt detection
+    'langfuse.prompt.name': langfusePromptName,
+    'langfuse.prompt.detected': !!langfusePromptName,
   }, eventTimestamp)
 
   logger.info({

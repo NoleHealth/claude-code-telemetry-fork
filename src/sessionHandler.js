@@ -1,6 +1,7 @@
 // Session Handler class extracted for better testability
 // const { Langfuse } = require('langfuse') // Imported but not used directly in this file
 const pino = require('pino')
+const { PromptCache } = require('./promptCache')
 
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -17,7 +18,7 @@ const logger = pino({
 })
 
 class SessionHandler {
-  constructor(sessionId, resourceAttributes = {}, langfuseInstance) {
+  constructor(sessionId, resourceAttributes = {}, langfuseInstance, promptCache = null) {
     if (!sessionId) {
       throw new Error('SessionHandler requires a sessionId')
     }
@@ -36,6 +37,10 @@ class SessionHandler {
     this.currentSpan = null
     this.toolSequence = []
     this.conversationStartTime = null
+    
+    // Prompt management
+    this.promptCache = promptCache
+    this.currentPromptMetadata = null
 
     // Metrics
     this.totalCost = 0
@@ -108,7 +113,7 @@ class SessionHandler {
     }
   }
 
-  handleUserPrompt(attrs, timestamp) {
+  async handleUserPrompt(attrs, timestamp) {
     logger.info(
       { sessionId: this.sessionId, promptLength: attrs.prompt_length || 0 },
       'User prompt received',
@@ -117,10 +122,35 @@ class SessionHandler {
     this.conversationCount++
     this.conversationStartTime = Date.now()
     this.toolSequence = []
+    
+    // Reset prompt metadata for new conversation
+    this.currentPromptMetadata = null
+    
+    // Check for Langfuse prompt detection
+    let traceName = `conversation-${this.conversationCount}`
+    let langfusePromptMetadata = null
+    
+    if (attrs['langfuse.prompt.detected'] && attrs['langfuse.prompt.name'] && this.promptCache) {
+      const promptName = attrs['langfuse.prompt.name']
+      logger.info({ promptName }, 'Langfuse prompt detected, fetching metadata')
+      
+      try {
+        langfusePromptMetadata = await this.promptCache.getPrompt(promptName)
+        if (langfusePromptMetadata) {
+          // Store for generation linking
+          this.currentPromptMetadata = langfusePromptMetadata
+          // Update trace name to include prompt name
+          traceName = `p-${promptName}`
+          logger.info({ promptName, version: langfusePromptMetadata.version }, 'Using Langfuse prompt')
+        }
+      } catch (error) {
+        logger.error({ error, promptName }, 'Failed to fetch prompt metadata')
+      }
+    }
 
     // Create a new trace for this conversation
     this.currentTrace = this.langfuse.trace({
-      name: `conversation-${this.conversationCount}`,
+      name: traceName,
       sessionId: this.sessionId,
       userId: attrs['user.email'] || attrs['user.id'] || this.metadata.userId,
       input: {
@@ -138,6 +168,15 @@ class SessionHandler {
           sessionId: attrs['session.id'] || this.sessionId,
           version: attrs['app.version'] || this.metadata.service.version,
         },
+        // Add Langfuse prompt metadata if detected
+        ...(langfusePromptMetadata && {
+          langfusePrompt: {
+            name: langfusePromptMetadata.name,
+            version: langfusePromptMetadata.version,
+            type: langfusePromptMetadata.type,
+            labels: langfusePromptMetadata.labels,
+          },
+        }),
       },
       version: this.metadata.release,
     })
@@ -209,6 +248,11 @@ class SessionHandler {
       startTime,
       endTime,
       model,
+      // Link to Langfuse prompt if detected
+      ...(this.currentPromptMetadata && {
+        promptName: this.currentPromptMetadata.name,
+        promptVersion: this.currentPromptMetadata.version,
+      }),
       input: attrs.input || `[${modelType} request]`,
       output: attrs.output || attrs.response || `[${modelType} response]`,
       usage: {

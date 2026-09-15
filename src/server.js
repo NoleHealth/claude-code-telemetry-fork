@@ -25,6 +25,7 @@ const { Langfuse } = require('langfuse')
 const pino = require('pino')
 const { retry } = require('./sessionHandler')
 const { handleTraces, handleMetrics, handleLogs, handleHealthCheck } = require('./requestHandlers')
+const { PromptCache } = require('./promptCache')
 const {
   validateConfig: validateConfigHelper,
   createConfig,
@@ -84,6 +85,20 @@ langfuse.on('error', (error) => {
   logger.error({ error }, 'Langfuse SDK error')
 })
 
+// Initialize Prompt Cache
+const promptCache = new PromptCache(langfuse, {
+  l1TTL: parseInt(process.env.LANGFUSE_PROMPT_CACHE_L1_TTL || '300000', 10), // 5 minutes
+  l2TTL: parseInt(process.env.LANGFUSE_PROMPT_CACHE_L2_TTL || '3600', 10), // 1 hour
+  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379/0',
+})
+
+// Optionally preload prompts on startup
+if (process.env.LANGFUSE_PROMPT_PRELOAD === 'true') {
+  promptCache.preloadPrompts().catch((error) => {
+    logger.error({ error }, 'Failed to preload prompts')
+  })
+}
+
 // Session management
 const sessions = new Map()
 const serverStartTime = Date.now()
@@ -105,6 +120,84 @@ const server = http.createServer((req, res) => {
   // Health check
   if (req.method === 'GET' && req.url === '/health') {
     handleHealthCheck(res, serverStartTime, sessions, requestCount, errorCount)
+    return
+  }
+
+  // Cache management endpoints (no auth required for internal use)
+  if (req.url && req.url.startsWith('/cache/')) {
+    // CORS headers for UI access
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+    
+    // Handle preflight
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200)
+      res.end()
+      return
+    }
+    
+    // GET /cache/status
+    if (req.method === 'GET' && req.url === '/cache/status') {
+      promptCache.getStatus().then((status) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(status, null, 2))
+      }).catch((error) => {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: error.message }))
+      })
+      return
+    }
+    
+    // POST /cache/invalidate
+    if (req.method === 'POST' && req.url === '/cache/invalidate') {
+      const chunks = []
+      req.on('data', chunk => chunks.push(chunk))
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString())
+          
+          if (data.promptName) {
+            // Invalidate specific prompt
+            promptCache.invalidate(data.promptName).then(() => {
+              logger.info(`Cache invalidated for prompt: ${data.promptName}`)
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ 
+                success: true, 
+                message: `Cache invalidated for prompt: ${data.promptName}` 
+              }))
+            }).catch((error) => {
+              res.writeHead(500, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: error.message }))
+            })
+          } else if (data.all) {
+            // Clear entire cache
+            promptCache.clear().then(() => {
+              logger.info('Cleared entire prompt cache')
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ 
+                success: true, 
+                message: 'All caches cleared' 
+              }))
+            }).catch((error) => {
+              res.writeHead(500, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: error.message }))
+            })
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Invalid request: specify promptName or all' }))
+          }
+        } catch (error) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Invalid JSON' }))
+        }
+      })
+      return
+    }
+    
+    // Unknown cache endpoint
+    res.writeHead(404)
+    res.end('Cache endpoint not found')
     return
   }
 
@@ -138,7 +231,7 @@ const server = http.createServer((req, res) => {
         } else if (req.url === '/v1/metrics') {
           handleMetrics(body, res, sessions, langfuse)
         } else if (req.url === '/v1/logs') {
-          handleLogs(body, res, sessions, langfuse)
+          handleLogs(body, res, sessions, langfuse, promptCache)
         } else {
           res.writeHead(404)
           res.end('Not found')
@@ -189,6 +282,9 @@ async function shutdown() {
   } catch (error) {
     logger.error({ error }, 'Error during Langfuse shutdown')
   }
+  
+  // Shutdown prompt cache
+  await promptCache.shutdown()
 
   logger.info('Shutdown complete')
 
