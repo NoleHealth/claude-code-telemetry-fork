@@ -3,20 +3,6 @@
  * Configures the test environment
  */
 
-// Mock Langfuse globally to avoid dynamic import errors
-jest.mock('langfuse', () => ({
-  Langfuse: jest.fn().mockImplementation(() => ({
-    on: jest.fn(),
-    trace: jest.fn(),
-    span: jest.fn(),
-    event: jest.fn(),
-    generation: jest.fn(),
-    flushAsync: jest.fn().mockResolvedValue(undefined),
-    shutdownAsync: jest.fn().mockResolvedValue(undefined),
-    _flushInterval: { unref: jest.fn() },
-  })),
-}))
-
 // Add custom Jest matchers if needed
 expect.extend({
   toBeValidPort(received) {

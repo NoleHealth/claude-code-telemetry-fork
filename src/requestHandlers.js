@@ -31,7 +31,7 @@ function handleTraces(data, res, sessions, langfuse) {
 /**
  * Handle OTLP metrics endpoint
  */
-function handleMetrics(data, res, sessions, langfuse) {
+function handleMetrics(data, res, sessions, langfuse, promptCache = null) {
   try {
     const metrics = JSON.parse(data.toString())
     logger.info({ size: data.length }, 'Received metrics')

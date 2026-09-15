@@ -8,8 +8,14 @@ module.exports = {
   ],
   testMatch: [
     '**/test/**/*.test.js',
+    '**/__tests__/**/*.test.js',
   ],
-  testTimeout: 15000, // Allow time for server startup in integration tests
+  // Jest doesn't honor `testTimeout` set inside `projects` entries when a project is
+  // selected via --selectProjects (observed on jest 30.0.4) - set it here instead so
+  // integration tests get enough headroom for this deployment's Langfuse `legacy` write
+  // mode ingestion latency (observed up to ~20s). package.json's test:integration script
+  // also passes --testTimeout=60000 explicitly as a second line of defense.
+  testTimeout: 60000,
   setupFilesAfterEnv: ['<rootDir>/test/setup.js'],
   // Projects for different test types
   projects: [
@@ -25,7 +31,8 @@ module.exports = {
       testMatch: [
         '<rootDir>/test/server.test.js',
         '<rootDir>/test/*.integration.test.js',
-        '<rootDir>/test/integration/**/*.test.js'
+        '<rootDir>/test/integration/**/*.test.js',
+        '<rootDir>/__tests__/**/*.test.js'
       ],
       maxWorkers: 1, // Run integration tests sequentially to avoid port conflicts
       testTimeout: 60000, // Longer timeout for real Langfuse calls

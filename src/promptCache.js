@@ -110,7 +110,7 @@ class PromptCache {
     this.metrics.misses++
     
     try {
-      const prompt = await this.langfuse.getPrompt(promptName, undefined, {
+      const prompt = await this.langfuse.prompt.get(promptName, {
         cacheTtlSeconds: 0, // Disable Langfuse SDK cache since we have our own
       })
       
@@ -264,7 +264,7 @@ class PromptCache {
     try {
       logger.info(`Preloading prompts with label: ${label}`)
       
-      const response = await this.langfuse.api.promptsList({
+      const response = await this.langfuse.api.prompts.list({
         label,
         limit: 100,
       })

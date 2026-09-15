@@ -311,27 +311,24 @@ function processToolDecision(attrs, standardAttrs, timestamp, session) {
   }, 'Tool decision processed')
 
   // Create event in current trace if exists
-  if (session.currentTrace && session.langfuse) {
-    session.langfuse.event({
-      name: 'tool-permission-decision',
-      traceId: session.currentTrace.id,
-      input: {
-        tool: toolName,
-        source,
-      },
-      output: {
-        decision,
-      },
-      metadata: {
-        tool: toolName,
-        decision,
-        source,
-        timestamp: eventTimestamp,
-        ...standardAttrs,
-      },
-      level: decision === 'accept' ? 'DEFAULT' : 'WARNING',
-    })
-  }
+  session.createEvent({
+    name: 'tool-permission-decision',
+    input: {
+      tool: toolName,
+      source,
+    },
+    output: {
+      decision,
+    },
+    metadata: {
+      tool: toolName,
+      decision,
+      source,
+      timestamp: eventTimestamp,
+      ...standardAttrs,
+    },
+    level: decision === 'accept' ? 'DEFAULT' : 'WARNING',
+  })
 
   return {
     type: 'tool_decision',
